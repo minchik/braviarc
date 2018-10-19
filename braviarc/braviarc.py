@@ -27,6 +27,7 @@ class BraviaRC:
         self._host = host
         self._mac = mac
         self._cookies = None
+        self._psk = None
         self._commands = []
         self._content_mapping = []
         self._app_list = {}
@@ -37,6 +38,15 @@ class BraviaRC:
         else:
             ret = json.dumps({"method": method, "params": [], "id": 1, "version": "1.0"})
         return ret
+
+    def _get_auth_headers(self):
+        if self._psk:
+            return {"X-Auth-PSK": self._psk}
+        return {}
+
+    def connected(self, psk):
+        self._psk = psk
+        self._cookies = requests.cookies.RequestsCookieJar()
 
     def connect(self, pin, clientid, nickname):
         """Connect to TV and get authentication cookie.
@@ -91,7 +101,9 @@ class BraviaRC:
             resp = response.json()
             _LOGGER.debug(json.dumps(resp, indent=4))
             if resp is None or not resp.get('error'):
-                self._cookies = response.cookies
+                cookies = requests.cookies.RequestsCookieJar()
+                cookies.set("auth", response.cookies.get("auth"))
+                self._cookies = cookies
                 return True
 
         return False
@@ -119,7 +131,9 @@ class BraviaRC:
 
     def send_req_ircc(self, params, log_errors=True):
         """Send an IRCC command via HTTP to Sony Bravia."""
-        headers = {'SOAPACTION': '"urn:schemas-sony-com:service:IRCC:1#X_SendIRCC"'}
+        headers = self._get_auth_headers()
+        headers.update({'SOAPACTION': '"urn:schemas-sony-com:service:IRCC:1#X_SendIRCC"'})
+
         data = ("<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org" +
                 "/soap/envelope/\" " +
                 "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body>" +
@@ -148,6 +162,7 @@ class BraviaRC:
         try:
             response = requests.post('http://'+self._host+'/'+url,
                                      data=params.encode("UTF-8"),
+                                     headers=self._get_auth_headers(),
                                      cookies=self._cookies,
                                      timeout=TIMEOUT)
         except requests.exceptions.HTTPError as exception_instance:
@@ -227,7 +242,7 @@ class BraviaRC:
 
     def get_power_status(self):
         """Get power status: off, active, standby"""
-        return_value = 'off' # by default the TV is turned off
+        return_value = 'off'  # by default the TV is turned off
         try:
             resp = self.bravia_req_json("sony/system", self._jdata_build("getPowerStatus", None), False)
             if resp is not None and not resp.get('error'):
@@ -269,24 +284,15 @@ class BraviaRC:
         self.bravia_req_json("sony/audio", self._jdata_build("setAudioVolume", {"target": "speaker",
                                                                                 "volume": volume * 100}))
 
-    def _recreate_auth_cookie(self):
-        """
-        The default cookie is for URL/sony. For some commands we need it for the root path
-        """
-        cookies = requests.cookies.RequestsCookieJar()
-        cookies.set("auth", self._cookies.get("auth"))
-        return cookies
-
     def load_app_list(self, log_errors=True):
         """Get the list of installed apps"""
-        headers = {}
         parsed_objects = {}
 
         try:
-            cookies = self._recreate_auth_cookie()
             response = requests.get('http://' + self._host + '/DIAL/sony/applist',
-                                     cookies=cookies,
-                                     timeout=TIMEOUT)
+                                    headers=self._get_auth_headers(),
+                                    cookies=self._cookies,
+                                    timeout=TIMEOUT)
         except requests.exceptions.HTTPError as exception_instance:
             if log_errors:
                 _LOGGER.error("HTTPError: " + str(exception_instance))
@@ -300,7 +306,8 @@ class BraviaRC:
             parsed_xml = minidom.parseString(content)
             for obj in parsed_xml.getElementsByTagName("app"):
                 if obj.getElementsByTagName("name")[0].firstChild and obj.getElementsByTagName("id")[0].firstChild:
-                    parsed_objects[str(obj.getElementsByTagName("name")[0].firstChild.nodeValue)] = str(obj.getElementsByTagName("id")[0].firstChild.nodeValue)
+                    parsed_objects[str(obj.getElementsByTagName("name")[0].firstChild.nodeValue)] = str(
+                        obj.getElementsByTagName("id")[0].firstChild.nodeValue)
 
         return parsed_objects
 
@@ -313,11 +320,10 @@ class BraviaRC:
 
     def _start_app(self, app_id, log_errors=True):
         """Start an app by id"""
-        headers = {}
         try:
-            cookies = self._recreate_auth_cookie()
             response = requests.post('http://' + self._host + '/DIAL/apps/' + app_id,
-                                     cookies=cookies,
+                                     headers=self._get_auth_headers(),
+                                     cookies=self._cookies,
                                      timeout=TIMEOUT)
         except requests.exceptions.HTTPError as exception_instance:
             if log_errors:
